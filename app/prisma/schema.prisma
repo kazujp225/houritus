@@ -1,0 +1,474 @@
+// ZettAI 破産手続支援SaaS - データベーススキーマ
+// 非弁リスク回避の設計原則に基づく
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ========================================
+// ロール・権限関連
+// ========================================
+
+enum Role {
+  LAWYER        // 弁護士：法的判断・承認・対外送信
+  STAFF         // 事務職員：依頼者対応・資料管理（事務連絡のみ）
+  CLIENT        // 依頼者：自分の案件の閲覧・資料提出
+  TECH_SUPPORT  // ZettAI技術サポート：システム保守（案件内容アクセス不可）
+  ADMIN         // システム管理者：ユーザー管理・設定
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+  TERMINATED
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+// ========================================
+// テナント（弁護士法人）
+// ========================================
+
+model Tenant {
+  id              String       @id @default(uuid())
+  name            String       @db.VarChar(100)
+  corporateNumber String?      @map("corporate_number") @db.VarChar(13)
+  address         String
+  phone           String       @db.VarChar(20)
+  email           String       @db.VarChar(255)
+  domain          String       @db.VarChar(255) @unique
+  plan            String       @default("STANDARD")
+  status          TenantStatus @default(ACTIVE)
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+
+  // Relations
+  users     User[]
+  cases     Case[]
+  auditLogs AuditLog[]
+
+  @@map("tenants")
+}
+
+// ========================================
+// ユーザー
+// ========================================
+
+model User {
+  id           String     @id @default(uuid())
+  tenantId     String     @map("tenant_id")
+  role         Role
+  email        String     @db.VarChar(255)
+  passwordHash String     @map("password_hash") @db.VarChar(255)
+  name         String     @db.VarChar(100)
+  lawyerNumber String?    @map("lawyer_number") @db.VarChar(20) // 弁護士登録番号
+  phone        String?    @db.VarChar(20)
+  mfaEnabled   Boolean    @default(false) @map("mfa_enabled")
+  mfaSecret    String?    @map("mfa_secret") @db.VarChar(255)
+  status       UserStatus @default(ACTIVE)
+  lastLoginAt  DateTime?  @map("last_login_at")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  // Relations
+  tenant              Tenant          @relation(fields: [tenantId], references: [id])
+  casesAsClient       Case[]          @relation("ClientCases")
+  casesAsLawyer       Case[]          @relation("LawyerCases")
+  casesAsStaff        Case[]          @relation("StaffCases")
+  conflictChecks      Case[]          @relation("ConflictChecker")
+  uploadedDocuments   Document[]      @relation("Uploader")
+  verifiedDocuments   Document[]      @relation("Verifier")
+  reviewedDrafts      Draft[]         @relation("Reviewer")
+  sentMessages        Message[]       @relation("Sender")
+  receivedMessages    Message[]       @relation("Recipient")
+  externalSends       ExternalSend[]
+  auditLogs           AuditLog[]
+
+  @@unique([tenantId, email])
+  @@map("users")
+}
+
+// ========================================
+// 案件管理
+// ========================================
+
+enum CaseType {
+  BANKRUPTCY        // 自己破産
+  CIVIL_REHAB       // 個人再生
+  VOLUNTARY_ARRANGEMENT // 任意整理
+}
+
+enum CaseStatus {
+  INQUIRY           // 問い合わせ
+  CONFLICT_CHECKING // 利益相反チェック中
+  CONSULTATION      // 相談中
+  RETAINED          // 受任済
+  DOCUMENT_COLLECTING // 資料収集中
+  DRAFTING          // 申立準備中
+  FILED             // 申立済
+  PROCEEDING        // 手続進行中
+  DISCHARGED        // 免責決定
+  CLOSED            // 終了
+  REJECTED          // 受任不可
+}
+
+enum ConflictCheckStatus {
+  PENDING   // 未チェック
+  CHECKING  // チェック中
+  APPROVED  // 受任可
+  REJECTED  // 受任不可
+}
+
+model Case {
+  id                   String              @id @default(uuid())
+  tenantId             String              @map("tenant_id")
+  caseNumber           String              @map("case_number") @db.VarChar(50)
+  clientId             String              @map("client_id")
+  lawyerId             String?             @map("lawyer_id")
+  staffId              String?             @map("staff_id")
+  caseType             CaseType            @default(BANKRUPTCY) @map("case_type")
+  status               CaseStatus          @default(INQUIRY)
+  conflictCheckStatus  ConflictCheckStatus @default(PENDING) @map("conflict_check_status")
+  conflictCheckAt      DateTime?           @map("conflict_check_at")
+  conflictCheckById    String?             @map("conflict_check_by_id")
+  conflictCheckReason  String?             @map("conflict_check_reason")
+  retentionStartedAt   DateTime?           @map("retention_started_at")
+  filedAt              DateTime?           @map("filed_at")
+  dischargedAt         DateTime?           @map("discharged_at")
+  closedAt             DateTime?           @map("closed_at")
+  createdAt            DateTime            @default(now()) @map("created_at")
+  updatedAt            DateTime            @updatedAt @map("updated_at")
+
+  // Relations
+  tenant           Tenant         @relation(fields: [tenantId], references: [id])
+  client           User           @relation("ClientCases", fields: [clientId], references: [id])
+  lawyer           User?          @relation("LawyerCases", fields: [lawyerId], references: [id])
+  staff            User?          @relation("StaffCases", fields: [staffId], references: [id])
+  conflictCheckBy  User?          @relation("ConflictChecker", fields: [conflictCheckById], references: [id])
+  clientProfile    ClientProfile?
+  creditors        Creditor[]
+  documents        Document[]
+  drafts           Draft[]
+  messages         Message[]
+  externalSends    ExternalSend[]
+
+  @@unique([tenantId, caseNumber])
+  @@map("cases")
+}
+
+// ========================================
+// 依頼者詳細情報
+// ========================================
+
+model ClientProfile {
+  id             String    @id @default(uuid())
+  caseId         String    @unique @map("case_id")
+  fullName       String    @map("full_name") @db.VarChar(100)
+  fullNameKana   String?   @map("full_name_kana") @db.VarChar(100)
+  birthDate      DateTime? @map("birth_date") @db.Date
+  address        String?
+  phone          String?   @db.VarChar(20)
+  occupation     String?   @db.VarChar(100)
+  employer       String?   @db.VarChar(200)
+  monthlyIncome  Int?      @map("monthly_income")
+  familySize     Int?      @map("family_size")
+  totalDebt      BigInt?   @map("total_debt")
+  creditorCount  Int?      @map("creditor_count")
+  hasRealEstate  Boolean?  @map("has_real_estate")
+  hasVehicle     Boolean?  @map("has_vehicle")
+  hasInsurance   Boolean?  @map("has_insurance")
+  bankruptcyReason String? @map("bankruptcy_reason")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  case Case @relation(fields: [caseId], references: [id])
+
+  @@map("client_profiles")
+}
+
+// ========================================
+// 債権者
+// ========================================
+
+enum DebtType {
+  LOAN
+  CREDIT_CARD
+  MORTGAGE
+  CAR_LOAN
+  CONSUMER_FINANCE
+  OTHER
+}
+
+model Creditor {
+  id              String    @id @default(uuid())
+  caseId          String    @map("case_id")
+  name            String    @db.VarChar(200)
+  address         String?
+  debtAmount      BigInt?   @map("debt_amount")
+  debtType        DebtType? @map("debt_type")
+  contractDate    DateTime? @map("contract_date") @db.Date
+  lastPaymentDate DateTime? @map("last_payment_date") @db.Date
+  noticeSentAt    DateTime? @map("notice_sent_at")
+  noticeSentById  String?   @map("notice_sent_by_id")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  case Case @relation(fields: [caseId], references: [id])
+
+  @@map("creditors")
+}
+
+// ========================================
+// 書類管理
+// ========================================
+
+enum DocumentType {
+  ID_DOCUMENT           // 本人確認書類
+  BANK_STATEMENT        // 銀行明細
+  PASSBOOK              // 通帳
+  PAY_SLIP              // 給与明細
+  TAX_CERTIFICATE       // 源泉徴収票
+  CREDIT_CARD_STATEMENT // クレジットカード明細
+  LOAN_CONTRACT         // ローン契約書
+  REAL_ESTATE_CERT      // 不動産登記簿
+  VEHICLE_CERT          // 車検証
+  INSURANCE_POLICY      // 保険証券
+  OTHER                 // その他
+}
+
+enum OcrStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model Document {
+  id          String       @id @default(uuid())
+  caseId      String       @map("case_id")
+  documentType DocumentType @map("document_type")
+  fileName    String       @map("file_name") @db.VarChar(255)
+  filePath    String       @map("file_path") @db.VarChar(500)
+  fileSize    BigInt       @map("file_size")
+  mimeType    String       @map("mime_type") @db.VarChar(100)
+  uploadedById String      @map("uploaded_by_id")
+  ocrStatus   OcrStatus?   @map("ocr_status")
+  ocrResult   Json?        @map("ocr_result")
+  verifiedById String?     @map("verified_by_id")
+  verifiedAt  DateTime?    @map("verified_at")
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+
+  // Relations
+  case       Case  @relation(fields: [caseId], references: [id])
+  uploadedBy User  @relation("Uploader", fields: [uploadedById], references: [id])
+  verifiedBy User? @relation("Verifier", fields: [verifiedById], references: [id])
+
+  @@map("documents")
+}
+
+// ========================================
+// AIドラフト
+// 重要：AIドラフトは弁護士用レビュー画面のみに表示
+// 依頼者には弁護士承認後の回答のみ表示
+// ========================================
+
+enum DraftType {
+  RETENTION_NOTICE  // 受任通知
+  PETITION          // 申立書
+  STATEMENT         // 陳述書
+  CREDITOR_LIST     // 債権者一覧表
+  ASSET_LIST        // 財産目録
+  INCOME_EXPENSE    // 家計収支表
+  RESPONSE          // 依頼者への回答
+  COURT_RESPONSE    // 裁判所への回答
+}
+
+enum DraftStatus {
+  PENDING   // 未レビュー
+  APPROVED  // 承認済
+  REJECTED  // 差戻し
+  MODIFIED  // 修正して承認
+}
+
+model Draft {
+  id            String      @id @default(uuid())
+  caseId        String      @map("case_id")
+  draftType     DraftType   @map("draft_type")
+  version       Int         @default(1)
+  content       String      // ドラフト内容
+  aiModel       String      @map("ai_model") @db.VarChar(100)
+  aiPromptHash  String?     @map("ai_prompt_hash") @db.VarChar(64)
+  flags         Json?       // 要確認フラグ（次のアクション形式）
+  status        DraftStatus @default(PENDING)
+  reviewedById  String?     @map("reviewed_by_id")
+  reviewedAt    DateTime?   @map("reviewed_at")
+  reviewComment String?     @map("review_comment")
+  finalContent  String?     @map("final_content") // 承認後の最終内容
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt @map("updated_at")
+
+  // Relations
+  case       Case            @relation(fields: [caseId], references: [id])
+  reviewedBy User?           @relation("Reviewer", fields: [reviewedById], references: [id])
+  messages   Message[]
+  externalSends ExternalSend[]
+
+  @@map("drafts")
+}
+
+// ========================================
+// メッセージ
+// ========================================
+
+enum MessageType {
+  LEGAL_RESPONSE  // 法的回答（LAWYER only）
+  ADMIN_NOTICE    // 事務連絡（LAWYER, STAFF）
+  REMINDER        // リマインド（LAWYER, STAFF）
+  SYSTEM          // システム通知
+}
+
+model Message {
+  id          String      @id @default(uuid())
+  caseId      String      @map("case_id")
+  senderId    String      @map("sender_id")
+  recipientId String      @map("recipient_id")
+  messageType MessageType @map("message_type")
+  subject     String?     @db.VarChar(255)
+  body        String
+  draftId     String?     @map("draft_id")
+  isRead      Boolean     @default(false) @map("is_read")
+  readAt      DateTime?   @map("read_at")
+  createdAt   DateTime    @default(now()) @map("created_at")
+
+  // Relations
+  case      Case   @relation(fields: [caseId], references: [id])
+  sender    User   @relation("Sender", fields: [senderId], references: [id])
+  recipient User   @relation("Recipient", fields: [recipientId], references: [id])
+  draft     Draft? @relation(fields: [draftId], references: [id])
+
+  @@map("messages")
+}
+
+// ========================================
+// 対外送信記録（送信ゲート）
+// 重要：送信権限は弁護士アカウントのみ
+// ========================================
+
+enum SendType {
+  RETENTION_NOTICE  // 受任通知
+  PETITION          // 申立書
+  SUPPLEMENTARY     // 補正書面
+  COURT_RESPONSE    // 裁判所への回答
+  CLIENT_RESPONSE   // 依頼者への回答
+}
+
+enum RecipientType {
+  CLIENT    // 依頼者
+  CREDITOR  // 債権者
+  COURT     // 裁判所
+}
+
+enum SendMethod {
+  EMAIL           // メール
+  POSTAL          // 郵送
+  CERTIFIED_MAIL  // 内容証明郵便
+  FAX             // FAX
+  PORTAL          // 裁判所ポータル
+}
+
+model ExternalSend {
+  id                   String        @id @default(uuid())
+  caseId               String        @map("case_id")
+  sendType             SendType      @map("send_type")
+  recipientType        RecipientType @map("recipient_type")
+  recipientName        String        @map("recipient_name") @db.VarChar(200)
+  recipientAddress     String?       @map("recipient_address")
+  draftId              String?       @map("draft_id")
+  contentSnapshot      String        @map("content_snapshot") // 送信内容スナップショット
+  sendMethod           SendMethod    @map("send_method")
+  sentById             String        @map("sent_by_id")
+  sentAt               DateTime      @map("sent_at")
+  confirmationChecked  Boolean       @map("confirmation_checked") // 確認チェックボックス
+  createdAt            DateTime      @default(now()) @map("created_at")
+
+  // Relations
+  case   Case   @relation(fields: [caseId], references: [id])
+  draft  Draft? @relation(fields: [draftId], references: [id])
+  sentBy User   @relation(fields: [sentById], references: [id])
+
+  @@map("external_sends")
+}
+
+// ========================================
+// 監査ログ
+// 全操作を記録、改ざん防止
+// ========================================
+
+enum AuditAction {
+  AUTH_LOGIN
+  AUTH_LOGOUT
+  AUTH_MFA_VERIFY
+  AUTH_LOGIN_FAILED
+  CASE_VIEW
+  CASE_CREATE
+  CASE_UPDATE
+  CASE_CONFLICT_CHECK
+  CASE_RETAIN
+  DRAFT_VIEW
+  DRAFT_APPROVE
+  DRAFT_MODIFY
+  DRAFT_REJECT
+  SEND_EXECUTE
+  DOCUMENT_UPLOAD
+  DOCUMENT_DOWNLOAD
+  DOCUMENT_DELETE
+  MESSAGE_SEND
+  USER_CREATE
+  USER_UPDATE
+  USER_DELETE
+  PERMISSION_DENIED
+}
+
+enum AuditResult {
+  SUCCESS
+  FAILURE
+  DENIED
+}
+
+model AuditLog {
+  id           String      @id @default(uuid())
+  tenantId     String      @map("tenant_id")
+  timestamp    DateTime    @default(now()) @db.Timestamptz(6)
+  userId       String?     @map("user_id")
+  role         Role?
+  action       AuditAction
+  resourceType String      @map("resource_type") @db.VarChar(50)
+  resourceId   String?     @map("resource_id")
+  caseId       String?     @map("case_id")
+  ipAddress    String      @map("ip_address") @db.VarChar(45)
+  userAgent    String?     @map("user_agent")
+  result       AuditResult
+  details      Json?
+  createdAt    DateTime    @default(now()) @map("created_at")
+
+  // Relations
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  user   User?  @relation(fields: [userId], references: [id])
+
+  @@index([tenantId, timestamp])
+  @@index([userId, action])
+  @@index([caseId])
+  @@map("audit_logs")
+}
