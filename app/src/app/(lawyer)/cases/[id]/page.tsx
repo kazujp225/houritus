@@ -647,6 +647,12 @@ export default function CaseDetailPage({ params }: { params: Promise<{ id: strin
                           </p>
                         </div>
                         <div className="flex items-center space-x-2">
+                          <Link
+                            href={`/cases/${caseId}/drafts/${draft.id}/preview`}
+                            className="text-sm text-gray-600 hover:text-gray-800"
+                          >
+                            プレビュー
+                          </Link>
                           {draft.status === 'PENDING' ? (
                             <Link
                               href={`/cases/${caseId}/drafts/${draft.id}/review`}
